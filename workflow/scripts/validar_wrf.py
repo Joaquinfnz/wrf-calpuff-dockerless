@@ -6,14 +6,25 @@ Genera los productos que exige la Guia SEA "Uso de modelos de calidad del aire
 en el SEIA" (2a ed., feb-2023) para la meteorologia del modelo de pronostico:
 
   6.6/6.7  Series de tiempo obs vs mod (T2, WS10, WD10)  -> validacion_wrf.png
-           Ciclos diarios promedio (hora local)          -> ciclos_diarios.png
+           Ciclos diarios promedio + banda p5-p95        -> ciclos_diarios.png
            Ciclo estacional (medias mensuales)           -> ciclo_estacional.png
            Rosas de viento obs y mod                     -> rosas_viento.png
            Mapas de viento d03 diurno/nocturno x
            verano/invierno (promedios U10/V10)           -> mapas_viento.png
+           Mapa de viento en condiciones criticas de
+           dispersion (proxy: viento debil, p10 WS10)    -> mapa_viento_critico.png
+  6.7      Datos en altura (perfil vertical simulado):
+           ciclo estacional del perfil de temperatura    -> perfil_vertical_estacional.png
+           perfiles representativos dia/noche            -> perfiles_dia_noche.png
   6.8/7    Metricas cuantitativas: sesgo, r, RMSE (minimo guia) + MAE, IOA,
            FB, NMSE, R2; globales, por estacion del año y dia/noche
                                         -> metricas_validacion.csv / .tex
+
+Nota: el mapa por percentil 90 del modelo de calidad del aire (guia 6.7) se
+genera en la PC con la salida de CALPUFF; aqui se entrega el proxy meteorologico
+de horas de peor ventilacion. Los perfiles verticales son los del modelo (WRF);
+la comparacion contra observaciones en altura (radiosondeo/SODAR), si las hay,
+se agrega cuando exista ese dato de entrada.
 
 Config (bloque validacion): observaciones (csv con columna fecha + t2/ws10/wd10),
 dominio (default d03), estacion_lat/lon (celda mas cercana; sin ella usa el
@@ -180,11 +191,18 @@ def _plot_ciclos_diarios(series, offset, out_dir):
             ax.set_ylim(0, 360)
             ax.set_yticks([0, 90, 180, 270, 360])
         else:
-            cm = info["mod"].groupby(hora_mod).mean()
+            # Ciclo diario con variabilidad p5-p95 (guia 6.6.3)
+            g = info["mod"].groupby(hora_mod)
+            cm = g.mean()
+            ax.fill_between(cm.index, g.quantile(0.05).values, g.quantile(0.95).values,
+                            color="b", alpha=0.15, label="WRF p5-p95")
             ax.plot(cm.index, cm.values, "b-o", ms=3, label="WRF")
             if info["obs"] is not None:
                 hora_obs = (info["obs"].index + pd.Timedelta(hours=offset)).hour
-                co = info["obs"].groupby(hora_obs).mean()
+                go = info["obs"].groupby(hora_obs)
+                co = go.mean()
+                ax.fill_between(co.index, go.quantile(0.05).values, go.quantile(0.95).values,
+                                color="r", alpha=0.12, label="Obs p5-p95")
                 ax.plot(co.index, co.values, "r-s", ms=3, label="Obs")
         ax.set_xlabel("Hora local")
         ax.set_ylabel(info["units"])
@@ -264,6 +282,37 @@ def _plot_rosas(series, out_dir):
     print(f"[OK] {out_dir}/rosas_viento.png")
 
 
+def _grid(ds):
+    """Coordenadas y terreno del dominio + paso de submuestreo para las flechas."""
+    xlat = np.asarray(ds["XLAT"].isel(Time=0).values)
+    xlon = np.asarray(ds["XLONG"].isel(Time=0).values)
+    hgt = np.asarray(ds["HGT"].isel(Time=0).values) if "HGT" in ds else None
+    paso = max(1, xlat.shape[0] // 20)
+    return xlon, xlat, hgt, paso
+
+
+def _draw_wind_panel(ax, xlon, xlat, hgt, u, v, paso, titulo):
+    """Dibuja un campo de viento (magnitud sombreada + flechas) sobre el terreno."""
+    vel = np.sqrt(u ** 2 + v ** 2)
+    if hgt is not None:
+        ax.contour(xlon, xlat, hgt, levels=10, colors="gray",
+                   linewidths=0.4, alpha=0.6)
+    pc = ax.pcolormesh(xlon, xlat, vel, cmap="YlOrRd", shading="auto", alpha=0.75)
+    ax.quiver(xlon[::paso, ::paso], xlat[::paso, ::paso],
+              u[::paso, ::paso], v[::paso, ::paso], scale=60, width=0.004)
+    plt.colorbar(pc, ax=ax, label="m/s", shrink=0.85)
+    ax.set_title(titulo)
+    ax.set_xlabel("Lon")
+    ax.set_ylabel("Lat")
+
+
+def _viento_medio(ds, tsel):
+    """Promedio de U10/V10 sobre los indices temporales tsel."""
+    u = np.asarray(ds["U10"].isel(Time=tsel).mean("Time").values)
+    v = np.asarray(ds["V10"].isel(Time=tsel).mean("Time").values)
+    return u, v
+
+
 def _plot_mapas_viento(ds, offset, out_dir):
     """Mapas de viento promedio del dominio: diurno/nocturno x verano/invierno
     (guia 6.7: patrones espaciales minimos)."""
@@ -276,36 +325,119 @@ def _plot_mapas_viento(ds, offset, out_dir):
         "Invierno - dia":   np.isin(local.month, ESTACIONES["invierno"]) & es_dia,
         "Invierno - noche": np.isin(local.month, ESTACIONES["invierno"]) & ~es_dia,
     }
-    xlat = np.asarray(ds["XLAT"].isel(Time=0).values)
-    xlon = np.asarray(ds["XLONG"].isel(Time=0).values)
-    hgt = np.asarray(ds["HGT"].isel(Time=0).values) if "HGT" in ds else None
-    paso = max(1, xlat.shape[0] // 20)
+    xlon, xlat, hgt, paso = _grid(ds)
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 12))
     for ax, (nombre, mask) in zip(axes.flat, casos.items()):
         if not mask.any():
             ax.set_title(f"{nombre} (sin datos)")
             continue
-        tsel = np.where(mask)[0]
-        u = np.asarray(ds["U10"].isel(Time=tsel).mean("Time").values)
-        v = np.asarray(ds["V10"].isel(Time=tsel).mean("Time").values)
-        vel = np.sqrt(u ** 2 + v ** 2)
-        if hgt is not None:
-            ax.contour(xlon, xlat, hgt, levels=10, colors="gray",
-                       linewidths=0.4, alpha=0.6)
-        pc = ax.pcolormesh(xlon, xlat, vel, cmap="YlOrRd", shading="auto", alpha=0.75)
-        ax.quiver(xlon[::paso, ::paso], xlat[::paso, ::paso],
-                  u[::paso, ::paso], v[::paso, ::paso], scale=60, width=0.004)
-        plt.colorbar(pc, ax=ax, label="m/s", shrink=0.85)
-        ax.set_title(f"Viento 10 m — {nombre} (n={mask.sum()})")
-        ax.set_xlabel("Lon")
-        ax.set_ylabel("Lat")
+        u, v = _viento_medio(ds, np.where(mask)[0])
+        _draw_wind_panel(ax, xlon, xlat, hgt, u, v, paso,
+                         f"Viento 10 m — {nombre} (n={mask.sum()})")
     fig.suptitle("Patrones espaciales de viento (promedios)", fontsize=14,
                  fontweight="bold")
     fig.tight_layout()
     fig.savefig(out_dir / "mapas_viento.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[OK] {out_dir}/mapas_viento.png")
+
+
+def _plot_mapa_critico(ds, j, i, out_dir):
+    """Mapa de viento en condiciones criticas de dispersion (guia 6.7).
+
+    La guia pide el patron para las 'horas criticas' = percentil 90 del modelo
+    de calidad del aire; eso depende de CALPUFF (lado PC). Aqui se entrega el
+    proxy meteorologico: las horas de peor ventilacion en la estacion, definidas
+    como velocidad de viento 10 m bajo su percentil 10 (viento debil = maxima
+    acumulacion). El mapa definitivo por percentil 90 de concentracion se genera
+    en la PC con la salida de CALPUFF."""
+    u = ds["U10"].isel(south_north=j, west_east=i)
+    v = ds["V10"].isel(south_north=j, west_east=i)
+    ws_est = np.sqrt(np.asarray(u.values) ** 2 + np.asarray(v.values) ** 2)
+    thr = np.nanpercentile(ws_est, 10)
+    mask = ws_est <= thr
+    if mask.sum() < 5:
+        print("[WARN] Muy pocas horas de viento debil; se omite el mapa critico.")
+        return
+    xlon, xlat, hgt, paso = _grid(ds)
+    um, vm = _viento_medio(ds, np.where(mask)[0])
+    fig, ax = plt.subplots(figsize=(7.5, 7))
+    _draw_wind_panel(ax, xlon, xlat, hgt, um, vm, paso,
+                     f"Viento 10 m — condiciones criticas de dispersion\n"
+                     f"(proxy: WS10 estacion <= p10 = {thr:.1f} m/s, n={int(mask.sum())})")
+    fig.tight_layout()
+    fig.savefig(out_dir / "mapa_viento_critico.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[OK] {out_dir}/mapa_viento_critico.png  "
+          f"(el mapa por percentil 90 de concentracion se completa con CALPUFF en la PC)")
+
+
+def _perfil_vertical(ds, j, i):
+    """Perfil vertical de temperatura (°C) del modelo en la celda de la estacion.
+
+    Devuelve (tk, agl_media): tk = (Time, nivel) en °C, agl_media = altura media
+    sobre el suelo de cada nivel (m). None si faltan variables 3D en el wrfout."""
+    req = ["T", "P", "PB", "PH", "PHB", "HGT"]
+    faltan = [v for v in req if v not in ds.variables]
+    if faltan:
+        print(f"[WARN] Faltan variables 3D en el wrfout {faltan}; "
+              f"no se generan perfiles verticales de altura.")
+        return None
+    col = dict(south_north=j, west_east=i)
+    theta = ds["T"].isel(**col) + 300.0                  # temp. potencial (K)
+    p = (ds["P"] + ds["PB"]).isel(**col)                 # presion total (Pa)
+    tk = np.asarray((theta * (p / 1.0e5) ** (287.0 / 1004.0)).values) - 273.15
+    ph = np.asarray(((ds["PH"] + ds["PHB"]).isel(**col) / 9.81).values)  # geopot. (m), w-levels
+    z_mass = 0.5 * (ph[:, :-1] + ph[:, 1:])              # niveles de masa
+    hgt = float(np.asarray(ds["HGT"].isel(Time=0, **col).values))
+    return tk, (z_mass - hgt).mean(axis=0)
+
+
+def _plot_perfil_estacional(tk, agl, idx, out_dir, cap_m=5000):
+    """Ciclo estacional del perfil vertical de temperatura (guia 6.7, Figura 6)."""
+    lev = agl <= cap_m
+    tk, agl = tk[:, lev], agl[lev]
+    meses = np.arange(1, 13)
+    grid = np.full((agl.size, meses.size), np.nan)
+    for k, mo in enumerate(meses):
+        sel = (idx.month == mo).values if hasattr(idx.month == mo, "values") else (idx.month == mo)
+        if sel.any():
+            grid[:, k] = tk[sel].mean(axis=0)
+    fig, ax = plt.subplots(figsize=(9, 6))
+    pc = ax.pcolormesh(meses, agl, np.ma.masked_invalid(grid),
+                       cmap="RdYlBu_r", shading="auto")
+    plt.colorbar(pc, ax=ax, label="Temperatura (°C)")
+    ax.set_xlabel("Mes")
+    ax.set_ylabel("Altura sobre el suelo (m)")
+    ax.set_xticks(meses)
+    ax.set_title("Ciclo estacional del perfil vertical de temperatura (WRF)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "perfil_vertical_estacional.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[OK] {out_dir}/perfil_vertical_estacional.png")
+
+
+def _plot_perfiles_dia_noche(tk, agl, idx, offset, out_dir, cap_m=5000):
+    """Perfiles verticales de temperatura representativos dia/noche (guia 6.7)."""
+    lev = agl <= cap_m
+    tk, agl = tk[:, lev], agl[lev]
+    hora_local = (idx + pd.Timedelta(hours=offset)).hour
+    dia = np.isin(hora_local, list(HORAS_DIA))
+    fig, ax = plt.subplots(figsize=(6, 7))
+    if dia.any():
+        ax.plot(tk[dia].mean(axis=0), agl, "r-o", ms=3, label="Dia")
+    if (~dia).any():
+        ax.plot(tk[~dia].mean(axis=0), agl, "b-s", ms=3, label="Noche")
+    ax.set_xlabel("Temperatura (°C)")
+    ax.set_ylabel("Altura sobre el suelo (m)")
+    ax.set_title("Perfil vertical de temperatura — dia vs noche (WRF)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_dir / "perfiles_dia_noche.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[OK] {out_dir}/perfiles_dia_noche.png")
 
 
 def validar_wrf(config_path):
@@ -397,6 +529,14 @@ def validar_wrf(config_path):
     _plot_ciclo_estacional(series, out_dir)
     _plot_rosas(series, out_dir)
     _plot_mapas_viento(ds, offset, out_dir)
+    _plot_mapa_critico(ds, j, i, out_dir)
+
+    # ── Datos en altura: perfil vertical simulado (guia 6.7) ────────────────
+    perfil = _perfil_vertical(ds, j, i)
+    if perfil is not None:
+        idx_v = pd.DatetimeIndex(np.asarray(ds["Time"].values))
+        _plot_perfil_estacional(*perfil, idx_v, out_dir)
+        _plot_perfiles_dia_noche(*perfil, idx_v, offset, out_dir)
 
     ds.close()
     print(f"\n[OK] Post-proceso meteorologico completo en {out_dir}")

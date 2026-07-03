@@ -62,7 +62,7 @@
  sf_surface_physics       = {{ wrf.physics.sf_surface_physics | join(', ') }},
  ra_sw_physics            = {{ wrf.physics.ra_sw_physics | join(', ') }},
  ra_lw_physics            = {{ wrf.physics.ra_lw_physics | join(', ') }},
- radt                     = 27,9,3,
+ radt                     = {% for d in wrf.dominios.values() | list %}{{ d.resolution_km }},{% endfor %}
  bldt                     = 0,0,0,
  cudt                     = 5,5,0,
  mp_zero_out              = 2,
