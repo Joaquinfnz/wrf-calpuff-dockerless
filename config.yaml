@@ -1,0 +1,199 @@
+# =============================================================================
+# WRF → CALPUFF Workflow — Configuracion de modelacion
+# Guia SEA "Uso de modelos de calidad del aire en el SEIA", 2a ed. (feb-2023,
+# reeditada ago-2025) — la version vigente.
+# =============================================================================
+
+# ── Proyecto ─────────────────────────────────────────────────────────────────
+proyecto:
+  nombre: "Aridos Rio Blanco Curacautin"
+  descripcion: "Modelacion MP10/MP2.5 - respuesta ICSARA, DIA extraccion de aridos"
+  consultora: "Rocks Geoconsulting"
+
+# ── Dominios WRF ─────────────────────────────────────────────────────────────
+# Se modelan 3 dominios anidados two-way nesting
+# d01 grueso (~9 km), d02 intermedio (~3 km), d03 fino (~1 km)
+# Requisito SEA: resolucion <= 1 km en dominio mas fino, >= 50 celdas
+wrf:
+  max_dom: 3
+  interval_seconds: 21600  # ERA5 cada 6h
+  e_vert: 40               # Niveles verticales
+  p_top_requested: 5000    # Tope en Pa
+  num_metgrid_levels: 38   # 37 niveles de presion ERA5 + 1 superficie
+
+  # Parametrizaciones fisicas (Falvey/Schmitz, validado sur de Chile)
+  physics:
+    mp_physics:         [6, 6, 6]     # WSM6 microphysics
+    cu_physics:         [1, 1, 0]     # Kain-Fritsch (d01,d02), off d03
+    bl_pbl_physics:     [1, 1, 1]     # YSU boundary layer
+    sf_sfclay_physics:  [1, 1, 1]     # Revised MM5 surface layer
+    sf_surface_physics: [2, 2, 2]     # Noah LSM
+    ra_sw_physics:      [1, 1, 1]     # Dudhia shortwave
+    ra_lw_physics:      [1, 1, 1]     # RRTM longwave
+
+  # WRF output config
+  history_interval: [60, 60, 60]   # Output cada 60 min (horario para CALPUFF)
+  frames_per_outfile: [24, 24, 24] # 24 frames por archivo (1 dia)
+  restart_interval: 360            # Checkpoint cada 6h
+
+  # Segmentacion temporal
+  # "continua" = corrida unica año completo (recomendado, ~5-7 dias en 64 cores)
+  # "mensual"  = 12 segmentos con spin-up cada uno (~15-18 dias en 64 cores)
+  segmentacion: "continua"
+  spinup_dias: 3  # solo aplica si segmentacion = "mensual"
+
+  dominios:
+    d01:
+      resolution_km: 9
+      e_we: 61
+      e_sn: 61
+      parent_grid_ratio: 1
+      parent_id: 1
+      i_parent_start: 1
+      j_parent_start: 1
+    d02:
+      resolution_km: 3
+      e_we: 61
+      e_sn: 61
+      parent_grid_ratio: 3
+      parent_id: 1
+      i_parent_start: 21
+      j_parent_start: 21
+    d03:
+      resolution_km: 1
+      e_we: 61
+      e_sn: 61
+      parent_grid_ratio: 3
+      parent_id: 2
+      i_parent_start: 21
+      j_parent_start: 21
+
+  # Proyeccion — Lambert conformal conic
+  map_proj: "lambert"
+
+  # Centro del dominio — Curacautin, Rio Blanco (AJUSTAR al centroide del layout del titular)
+  ref_lat: -38.44
+  ref_lon: -71.88
+  truelat1: -37.0
+  truelat2: -40.0
+  stand_lon: -71.88
+  geog_data_res: ["30s", "30s", "30s"]
+
+# ── Periodo de modelacion ────────────────────────────────────────────────────
+# Requisito SEA (5.3.1): 1 año completo como minimo para contaminantes primarios.
+# Periodo elegido: jun-2025 -> may-2026 (el año movil mas actual con ERA5
+# consolidado; cerrar mas cerca de hoy usaria ERA5T preliminar y las obs de la
+# estacion de validacion no estarian publicadas).
+# Corrida continua con spin-up de 3 dias antes del inicio de evaluacion.
+# Los meses/dias ERA5 a descargar se derivan de inicio..fin (spin-up incluido;
+# en los meses de borde solo se bajan los dias necesarios).
+periodo:
+  inicio: "2025-05-29_00:00:00"             # arranque WRF (incluye spin-up)
+  inicio_evaluacion: "2025-06-01_00:00:00"  # inicio del año evaluado (el spin-up se excluye del 3D.DAT y de las metricas)
+  fin:    "2026-06-01_00:00:00"             # fin (exactamente 365 dias de evaluacion)
+  etiqueta: "jun2025_may2026"               # nombra las carpetas de salida
+
+# ── ERA5 Download (CDS API) ──────────────────────────────────────────────
+era5:
+  # [N, W, S, E] — DEBE cubrir el dominio d01 completo (60 celdas x 9 km = 540 km
+  # => +-2.4 grados lat, +-3.1 grados lon a esta latitud) + margen 0.5.
+  # check_config.py valida esta cobertura. importar_kmz.py --apply la recalcula.
+  area: [-35.5, -75.5, -41.4, -68.3]
+  grid: [0.25, 0.25]          # Resolucion ERA5
+  # NOTA: las variables y niveles los define download_era5.py (37 niveles ERA5,
+  # pressure-levels + single-levels). Estos campos quedan solo como referencia.
+  cds_api_key: ""             # Token CDS (mejor via variable de entorno CDSAPI_KEY)
+  cds_api_url: "https://cds.climate.copernicus.eu/api"  # CDS nuevo (PAT). El /api/v2 fue retirado.
+
+# ── CALMET ───────────────────────────────────────────────────────────────────
+calmet:
+  nx: 60
+  ny: 60
+  nz: 12               # Niveles verticales CALMET
+  dgridkm: 1.0         # Resolucion (km)
+  iwfcod: 1            # Usar campos 3D de WRF directamente
+  iculdat: 1           # Usar datos de uso de suelo de WRF
+  itergrd: 1           # Esquema TERGRAD (terrain gradient adjustments)
+  bias: [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+
+# ── CALPUFF ──────────────────────────────────────────────────────────────────
+calpuff:
+  nsecdt: 3600         # Paso temporal 1h
+  nspt1: 4             # Numero de especies
+  npt1: 0              # Numero de fuentes puntuales
+  nar1: 0              # Numero de fuentes de area
+  nln1: 0              # Numero de fuentes lineales
+  nvol1: 0             # Numero de fuentes volumetricas
+  metrun: 1            # Correr CALMET primero
+  mavgfl: 1            # Archivo de promedios horarios
+
+# ── Receptores (grillas SEA) ─────────────────────────────────────────────────
+receptores:
+  generar_grillas: true
+  grillas_sea:
+    - espaciado_m: 20
+      cobertura_km: 0.5
+    - espaciado_m: 50
+      cobertura_km: 2
+    - espaciado_m: 250
+      cobertura_km: 5
+    - espaciado_m: 500
+      cobertura_km: 10
+    - espaciado_m: 1000
+      cobertura_km: 20
+  receptores_discretos: "receptores.csv"  # Receptores sensibles (opcional)
+
+# ── Emisiones ────────────────────────────────────────────────────────────────
+# Requisito SEA: tasas horarias reales, no promedios diarios/anuales
+emisiones:
+  archivo: "emisiones.csv"
+  formato: "horario"   # Obligatorio segun guia SEA
+
+# ── Normas de calidad del aire (DS 38/2011, DS 104/2018) ─────────────────────
+normas:
+  MP10:               # DS 12/2022 MMA (reemplaza DS 59/1998)
+    anual: 50    # ug/m3N, promedio 3 anios
+    diaria: 130  # ug/m3N, percentil 98
+  MP2_5:              # DS 12/2011 MMA
+    anual: 20    # ug/m3N
+    diaria: 50   # ug/m3N, percentil 98
+  SO2:                # DS 104/2018 MMA (reemplaza DS 113/2002)
+    anual: 60    # ug/m3N (23 ppbv), promedio 3 anios
+    horaria: 350 # ug/m3N (134 ppbv), percentil 98,5
+  NO2:                # DS 40/2024 MMA (reemplaza DS 114/2002)
+    anual: 40    # ug/m3N
+    diaria: 100  # ug/m3N
+    horaria: 200 # ug/m3N (OMS 2021)
+  CO:                 # DS 115/2002 MINSEGPRES
+    horaria: 30000     # ug/m3N
+    octohoraria: 10000 # ug/m3N
+  O3:                 # DS 112/2002 MINSEGPRES
+    octohoraria: 120  # ug/m3N, percentil 99
+
+# ── Validacion meteorologica ─────────────────────────────────────────────────
+# Requisito SEA: comparar WRF vs observaciones >= 1 año
+validacion:
+  # CSV con columnas: fecha (YYYY-MM-DD HH:MM, hora local), t2 (°C),
+  # ws10 (m/s), wd10 (grados, 0=N desde donde sopla)
+  observaciones: "observaciones.csv"
+  dominio: "d03"          # wrfout a validar (dominio fino, donde cae la estacion)
+  estacion_lat: -38.44    # AJUSTAR a la estacion real (celda mas cercana)
+  estacion_lon: -71.88
+  obs_utc_offset: -4      # hora de las obs respecto a UTC (Chile: -4 / -3 verano)
+  metricas: ["rmse", "mae", "sesgo", "ioa", "fb", "nmse", "r2"]
+  variables: ["t2", "ws10", "wd10"]
+
+# ── Rutas del servidor ───────────────────────────────────────────────────────
+rutas:
+  wps_geog: "~/data/WPS_GEOG"   # Terreno estatico 30s (setup_dockerless.sh lo baja aqui)
+
+# ── Ejecucion nativa (sin Docker, sin sudo) ──────────────────────────────────
+# Rutas donde scripts/setup_dockerless.sh compila los binarios. Si cambiaste
+# OPT_DIR al correr el setup, ajusta estas rutas para que coincidan.
+ejecucion:
+  wrf_home: "~/opt/wrf"                 # contiene main/wrf.exe, main/real.exe, run/
+  wps_home: "~/opt/wps"                 # contiene geogrid/ungrib/metgrid.exe, link_grib.csh
+  calwrf_exe: "~/opt/calwrf/calwrf.exe"
+  wrf_version: "4.6.0"
+  wps_version: "4.6.0"
+  nprocs: 32                            # ranks MPI para real/wrf (se acota a los cores reales)

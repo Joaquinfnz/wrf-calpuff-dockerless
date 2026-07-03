@@ -1,0 +1,41 @@
+# =============================================================================
+# namelist.wps — Jinja2 Template
+# Requisito SEA: debe entregarse en la evaluacion
+# =============================================================================
+&share
+ wrf_core = 'ARW',
+ max_dom   = {{ wrf.max_dom }},
+ start_date = {% for d in range(wrf.max_dom) %}'{{ periodo.inicio }}',{% if not loop.last %} {% endif %}{% endfor %}
+ end_date   = {% for d in range(wrf.max_dom) %}'{{ periodo.fin }}',{% if not loop.last %} {% endif %}{% endfor %}
+ interval_seconds = {{ wrf.interval_seconds }},
+ io_form_geogrid = 2,
+/
+
+&geogrid
+ parent_id         = {% for d in wrf.dominios.values() | list %}{{ d.parent_id }},{% endfor %}
+ parent_grid_ratio = {% for d in wrf.dominios.values() | list %}{{ d.parent_grid_ratio }},{% endfor %}
+ i_parent_start    = {% for d in wrf.dominios.values() | list %}{{ d.i_parent_start }},{% endfor %}
+ j_parent_start    = {% for d in wrf.dominios.values() | list %}{{ d.j_parent_start }},{% endfor %}
+ e_we              = {% for d in wrf.dominios.values() | list %}{{ d.e_we }},{% endfor %}
+ e_sn              = {% for d in wrf.dominios.values() | list %}{{ d.e_sn }},{% endfor %}
+ geog_data_res     = {% for r in wrf.geog_data_res %}'{{ r }}',{% endfor %}
+ dx = {{ wrf.dominios.d01.resolution_km * 1000 }},
+ dy = {{ wrf.dominios.d01.resolution_km * 1000 }},
+ map_proj  = '{{ wrf.map_proj }}',
+ ref_lat   = {{ wrf.ref_lat }},
+ ref_lon   = {{ wrf.ref_lon }},
+ truelat1  = {{ wrf.truelat1 }},
+ truelat2  = {{ wrf.truelat2 }},
+ stand_lon = {{ wrf.stand_lon }},
+ geog_data_path = '{{ rutas.wps_geog }}',
+/
+
+&ungrib
+ out_format = 'WPS',
+ prefix     = 'FILE',
+/
+
+&metgrid
+ fg_name          = 'FILE',
+ io_form_metgrid  = 2,
+/

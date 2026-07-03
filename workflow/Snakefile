@@ -1,0 +1,202 @@
+# =============================================================================
+# Snakefile (solo servidor): ERA5 -> WPS -> WRF -> CALWRF -> 3D.DAT
+# Version DOCKERLESS: ejecuta los binarios nativos compilados en $HOME por
+# scripts/setup_dockerless.sh (sin Docker, sin sudo). Correr siempre con el
+# entorno activo:  source scripts/env_wrf.sh
+# Corrida continua (un solo run). CALMET/CALPUFF/post corren en la PC.
+# Las etapas WPS/WRF usan archivos-marcador (.ok) porque sus salidas reales
+# tienen nombres con timestamp/zero-pad que no conviene enumerar en el DAG.
+# =============================================================================
+
+import os
+import sys
+import yaml
+from pathlib import Path
+
+sys.path.insert(0, "workflow/scripts")
+from download_era5 import meses_periodo
+
+configfile: "config.yaml"
+
+with open("config.yaml") as f:
+    cfg = yaml.safe_load(f)
+
+PROYECTO   = cfg["proyecto"]["nombre"].replace(" ", "_")
+ETIQUETA   = cfg["periodo"]["etiqueta"]
+OUTPUT_DIR = f"data/outputs/{PROYECTO}_{ETIQUETA}"
+
+# Instalacion nativa (setup_dockerless.sh); rutas con ~ expandido
+EJEC       = cfg["ejecucion"]
+WRF_HOME   = os.path.expanduser(EJEC["wrf_home"])
+WPS_HOME   = os.path.expanduser(EJEC["wps_home"])
+CALWRF_EXE = os.path.expanduser(EJEC["calwrf_exe"])
+NPROCS     = EJEC["nprocs"]
+
+# Meses derivados de periodo.inicio..fin: incluye el spin-up aunque caiga en
+# el anio anterior (antes solo se bajaba periodo.anio y ungrib fallaba).
+ERA5_FILE  = [f"data/raw/ERA5_{y}_{m:02d}.grib"
+              for y, m in meses_periodo(cfg["periodo"]["inicio"], cfg["periodo"]["fin"])]
+
+# mpirun -np acotado a los cores reales del servidor (en un nodo chico,
+# -np 32 haria fallar MPICH por falta de slots).
+MPI_NP = f"$(( $(nproc) < {NPROCS} ? $(nproc) : {NPROCS} ))"
+GEOGRID_OK = "data/wps/.geogrid_ok"
+UNGRIB_OK  = "data/wps/.ungrib_ok"
+METGRID_OK = "data/wps/.metgrid_ok"
+REAL_OK    = "data/wrf/.real_ok"
+WRF_MARKER = f"data/wrf/.wrf_done_{ETIQUETA}"
+
+
+# ── Objetivo: 3D.DAT (CALWRF) + validacion meteorologica ────────────────────
+rule all:
+    input:
+        "data/calwrf/3d.dat",
+        f"{OUTPUT_DIR}/validacion/validacion_wrf.png",
+
+
+# ── 1. Check de config (Guia SEA) ───────────────────────────────────────────
+rule check_config:
+    output:
+        "data/.check_config_ok"
+    shell:
+        "python3 workflow/scripts/check_config.py config.yaml && touch {output}"
+
+
+# ── 2. Descarga ERA5 (pressure-levels + single-levels), un job por mes ──────
+# Por-mes para que un fallo de descarga no invalide (Snakemake borraria) los
+# meses ya bajados, y para reanudar donde quedo.
+rule download_era5:
+    input:
+        "data/.check_config_ok"
+    output:
+        "data/raw/ERA5_{anio}_{mes}.grib"
+    wildcard_constraints:
+        anio=r"\d{4}",
+        mes=r"\d{2}"
+    shell:
+        "python3 workflow/scripts/download_era5.py config.yaml --solo {wildcards.anio}-{wildcards.mes}"
+
+
+# ── 3. Renderizar namelists (WPS + WRF) ─────────────────────────────────────
+rule render_namelists:
+    input:
+        "data/.check_config_ok"
+    output:
+        "data/wps/namelist.wps",
+        "data/wrf/namelist.input"
+    shell:
+        "python3 workflow/scripts/render_namelist.py config.yaml"
+
+
+# ── 4. WPS: geogrid ─────────────────────────────────────────────────────────
+rule geogrid:
+    input:
+        "data/wps/namelist.wps"
+    output:
+        GEOGRID_OK
+    shell:
+        """
+        cd data/wps && \
+            ln -sf {WPS_HOME}/geogrid/GEOGRID.TBL.ARW GEOGRID.TBL && \
+            {WPS_HOME}/geogrid.exe 2>&1 | tee geogrid.log
+        touch {output}
+        """
+
+
+# ── 5. WPS: ungrib (usa Vtable.ERA5) ────────────────────────────────────────
+rule ungrib:
+    input:
+        ERA5_FILE,
+        "data/wps/namelist.wps"
+    output:
+        UNGRIB_OK
+    shell:
+        """
+        cp static/Vtable.ERA5 data/wps/Vtable
+        cd data/wps && \
+            tcsh {WPS_HOME}/link_grib.csh ../raw/ERA5_*.grib && \
+            {WPS_HOME}/ungrib.exe 2>&1 | tee ungrib.log
+        touch {output}
+        """
+
+
+# ── 6. WPS: metgrid ─────────────────────────────────────────────────────────
+rule metgrid:
+    input:
+        GEOGRID_OK,
+        UNGRIB_OK,
+        "data/wps/namelist.wps"
+    output:
+        METGRID_OK
+    shell:
+        """
+        cd data/wps && \
+            ln -sf {WPS_HOME}/metgrid/METGRID.TBL.ARW METGRID.TBL && \
+            {WPS_HOME}/metgrid.exe 2>&1 | tee metgrid.log
+        touch {output}
+        """
+
+
+# ── 7. WRF: real (enlaza tablas de $WRF_HOME/run, preserva namelist) ────────
+rule real:
+    input:
+        METGRID_OK,
+        "data/wrf/namelist.input"
+    output:
+        REAL_OK
+    shell:
+        """
+        cd data/wrf && \
+            ln -sf {WRF_HOME}/run/*.TBL {WRF_HOME}/run/*_DATA {WRF_HOME}/run/RRTM* {WRF_HOME}/run/*.formatted . 2>/dev/null || true
+        cd data/wrf && \
+            ln -sf {WRF_HOME}/main/real.exe {WRF_HOME}/main/wrf.exe . && \
+            ln -sf ../wps/met_em.d0* . && \
+            mpirun -np {MPI_NP} ./real.exe 2>&1 | tee real.log
+        touch {output}
+        """
+
+
+# ── 8. WRF: wrf (corrida continua, checkpoint cada 6h via restart_interval) ─
+# prepare_restart.py: si hay wrfrst_* de una caida previa, parcha el namelist
+# (restart=.true. + start_* al checkpoint) para reanudar EN VEZ de partir de 0.
+rule wrf:
+    input:
+        REAL_OK,
+        "data/wrf/namelist.input"
+    output:
+        WRF_MARKER
+    shell:
+        """
+        python3 workflow/scripts/prepare_restart.py data/wrf/namelist.input data/wrf
+        cd data/wrf && \
+            mpirun -np {MPI_NP} ./wrf.exe 2>&1 | tee -a wrf.log
+        touch {output}
+        """
+
+
+# ── 9. CALWRF: wrfout (~40 GB) -> 3D.DAT (~4 GB) ────────────────────────────
+# Ultima etapa del servidor. CALMET/CALPUFF se hacen en la PC sobre el 3D.DAT.
+rule calwrf:
+    input:
+        WRF_MARKER
+    output:
+        "data/calwrf/3d.dat"
+    shell:
+        """
+        python3 workflow/scripts/gen_calwrf_inp.py config.yaml
+        cd data/calwrf && \
+            {CALWRF_EXE} calwrf.inp 2>&1 | tee calwrf.log
+        """
+
+
+# ── 10. Validacion WRF vs observaciones (exigencia SEA) ─────────────────────
+rule validar_wrf:
+    input:
+        WRF_MARKER
+    output:
+        f"{OUTPUT_DIR}/validacion/validacion_wrf.png"
+    shell:
+        """
+        mkdir -p {OUTPUT_DIR}/validacion
+        python3 workflow/scripts/validar_wrf.py config.yaml
+        """

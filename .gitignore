@@ -1,0 +1,57 @@
+# ── Datos generados ──────────────────────────────────────────────────────────
+data/
+outputs/
+
+# ── Datos WPS_GEOG (muy pesados) ────────────────────────────────────────────
+WPS_GEOG/
+
+# ── Tarballs de fuentes/datos ───────────────────────────────────────────────
+*.tar
+*.tar.gz
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+envs/
+
+# ── WRF outputs ─────────────────────────────────────────────────────────────
+wrfout_*
+wrfrst_*
+wrfbdy_*
+wrfinput_*
+met_em.*
+GRIBFILE.*
+FILE:*
+PFILE:*
+rsl.*
+*.log
+
+# ── CALPUFF outputs ─────────────────────────────────────────────────────────
+calpuff.lst
+calpuff.log
+calpuff.dat
+calpuff.exe
+calmet.dat
+calmet.log
+calmet.lst
+calmet.exe
+conc.dat
+*.LST
+*.DAT
+
+# ── Ambiente ────────────────────────────────────────────────────────────────
+.env
+secrets.env
+
+# ── IDE ─────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Backups de importar_kmz --apply ─────────────────────────────────────────
+*.yaml.bak
+
+# ── Snakemake ───────────────────────────────────────────────────────────────
+.snakemake/
